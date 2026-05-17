@@ -153,4 +153,4 @@ MIT License
 
 ## Author
 
-**Sparsh Khandelwal** 🚀
+**Sparsh Khandelwal**
