@@ -219,10 +219,15 @@ class AWSScanner:
         arns = ecs.list_clusters().get('clusterArns', [])
         if not arns:
             return []
+
+        # Get all subnet IDs belonging to this VPC for filtering
+        vpc_subnet_ids = {s['SubnetId'] for s in self.ec2.describe_subnets(
+            Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}]
+        )['Subnets']}
+
         clusters = ecs.describe_clusters(clusters=arns, include=['TAGS'])['clusters']
         result = []
         for cluster in clusters:
-            # Fetch services to check if any run in this VPC
             svc_arns = ecs.list_services(cluster=cluster['clusterArn']).get('serviceArns', [])
             services = []
             if svc_arns:
@@ -230,7 +235,9 @@ class AWSScanner:
                 for svc in svcs:
                     net = svc.get('networkConfiguration', {}).get('awsvpcConfiguration', {})
                     svc_subnets = net.get('subnets', [])
-                    # include service if it has subnets in this VPC
+                    # Only include service if its subnets belong to this VPC
+                    if not svc_subnets or not set(svc_subnets) & vpc_subnet_ids:
+                        continue
                     services.append({
                         'name': svc['serviceName'],
                         'task_definition': svc['taskDefinition'],
