@@ -429,8 +429,201 @@ output "private_db_subnets_ids" {
 }
 '''
 
-_MOD_VPC_VPC_TF = open("/home/sparsh/VPC code module/modules/vpc/vpc.tf").read()
-_MOD_VPC_FLOWLOGS_TF = open("/home/sparsh/VPC code module/modules/vpc/vpc_flowlogs.tf").read()
+_MOD_VPC_VPC_TF = '''\
+//=======================================================================================================\\\\
+//                                           VPC                                                         \\\\
+//=======================================================================================================\\\\
+
+resource "aws_vpc" "vpc" {
+  cidr_block           = var.vpc_conf.vpc.cidr_vpc
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = merge(
+    {
+      Name        = "${var.environment}-vpc"
+      Environment = var.environment
+    },
+    lookup(var.vpc_conf.vpc, "additional_tags", {})
+  )
+}
+
+//=======================================================================================================\\\\
+//                                           Internet Gateway                                            \\\\
+//=======================================================================================================\\\\
+
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.vpc.id
+
+  tags = {
+    Name        = "${var.environment}-igw"
+    Environment = var.environment
+  }
+}
+
+//=======================================================================================================\\\\
+//                                           Subnets                                                     \\\\
+//=======================================================================================================\\\\
+
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+resource "aws_subnet" "public_subnets" {
+  count                   = length(var.vpc_conf.subnets.public_subnets.cidr)
+  vpc_id                  = aws_vpc.vpc.id
+  cidr_block              = var.vpc_conf.subnets.public_subnets.cidr[count.index]
+  availability_zone       = data.aws_availability_zones.available.names[count.index % length(data.aws_availability_zones.available.names)]
+  map_public_ip_on_launch = true
+
+  tags = merge(
+    {
+      Name        = "${var.environment}-${var.vpc_conf.subnets.public_subnets.name}-${count.index + 1}"
+      Environment = var.environment
+    },
+    lookup(var.vpc_conf.subnets.public_subnets, "additional_tags", {})
+  )
+}
+
+resource "aws_subnet" "private_app_subnets" {
+  count             = length(var.vpc_conf.subnets.private_app_subnets.cidr)
+  vpc_id            = aws_vpc.vpc.id
+  cidr_block        = var.vpc_conf.subnets.private_app_subnets.cidr[count.index]
+  availability_zone = data.aws_availability_zones.available.names[count.index % length(data.aws_availability_zones.available.names)]
+
+  tags = merge(
+    {
+      Name        = "${var.environment}-${var.vpc_conf.subnets.private_app_subnets.name}-${count.index + 1}"
+      Environment = var.environment
+    },
+    lookup(var.vpc_conf.subnets.private_app_subnets, "additional_tags", {})
+  )
+}
+
+resource "aws_subnet" "private_db_subnets" {
+  count             = length(var.vpc_conf.subnets.private_db_subnets.cidr)
+  vpc_id            = aws_vpc.vpc.id
+  cidr_block        = var.vpc_conf.subnets.private_db_subnets.cidr[count.index]
+  availability_zone = data.aws_availability_zones.available.names[count.index % length(data.aws_availability_zones.available.names)]
+
+  tags = merge(
+    {
+      Name        = "${var.environment}-${var.vpc_conf.subnets.private_db_subnets.name}-${count.index + 1}"
+      Environment = var.environment
+    },
+    lookup(var.vpc_conf.subnets.private_db_subnets, "additional_tags", {})
+  )
+}
+
+//=======================================================================================================\\\\
+//                                           Route Tables                                                \\\\
+//=======================================================================================================\\\\
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.igw.id
+  }
+
+  tags = {
+    Name        = "${var.environment}-public-rt"
+    Environment = var.environment
+  }
+}
+
+resource "aws_route_table_association" "public" {
+  count          = length(aws_subnet.public_subnets)
+  subnet_id      = aws_subnet.public_subnets[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.vpc.id
+
+  tags = {
+    Name        = "${var.environment}-private-rt"
+    Environment = var.environment
+  }
+}
+
+resource "aws_route_table_association" "private_app" {
+  count          = length(aws_subnet.private_app_subnets)
+  subnet_id      = aws_subnet.private_app_subnets[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+
+resource "aws_route_table_association" "private_db" {
+  count          = length(aws_subnet.private_db_subnets)
+  subnet_id      = aws_subnet.private_db_subnets[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+'''
+
+_MOD_VPC_FLOWLOGS_TF = '''\
+//=======================================================================================================\\\\
+//                                           VPC Flow Logs                                               \\\\
+//=======================================================================================================\\\\
+
+resource "aws_flow_log" "vpc" {
+  vpc_id               = aws_vpc.vpc.id
+  traffic_type         = "ALL"
+  iam_role_arn         = aws_iam_role.flow_log.arn
+  log_destination_type = "cloud-watch-logs"
+  log_destination      = aws_cloudwatch_log_group.flow_log.arn
+
+  tags = {
+    Name        = "${var.environment}-vpc-flow-log"
+    Environment = var.environment
+  }
+}
+
+resource "aws_cloudwatch_log_group" "flow_log" {
+  name              = "/aws/vpc/flow-log/${var.environment}"
+  retention_in_days = 30
+
+  tags = {
+    Name        = "${var.environment}-vpc-flow-log-group"
+    Environment = var.environment
+  }
+}
+
+resource "aws_iam_role" "flow_log" {
+  name = "${var.environment}-vpc-flow-log-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "vpc-flow-logs.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "flow_log" {
+  name = "${var.environment}-vpc-flow-log-policy"
+  role = aws_iam_role.flow_log.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams"
+      ]
+      Effect   = "Allow"
+      Resource = "*"
+    }]
+  })
+}
+'''
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MODULE: nat-gateway  (Fix 1: generates its own EIP, no hardcoded allocation ID)
@@ -852,13 +1045,118 @@ output "arn" { value = aws_s3_bucket.this.arn }
 # MODULE registry
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _client_vpn_module():
-    base = "/home/sparsh/terraform-client-vpn/modules/client-vpn"
-    result = {}
-    for fname in ("main.tf", "variables.tf", "outputs.tf"):
-        with open(f"{base}/{fname}") as f:
-            result[fname] = f.read()
-    return result
+_MOD_CLIENT_VPN_MAIN = '''\
+//=======================================================================================================\\\\
+//                                           Client VPN Endpoint                                         \\\\
+//=======================================================================================================\\\\
+
+resource "aws_cloudwatch_log_group" "vpn" {
+  name              = "/aws/vpn/${var.environment}-client-vpn"
+  retention_in_days = 30
+
+  tags = {
+    Name        = "${var.environment}-client-vpn-log-group"
+    Environment = var.environment
+  }
+}
+
+resource "aws_cloudwatch_log_stream" "vpn" {
+  name           = "connection-log"
+  log_group_name = aws_cloudwatch_log_group.vpn.name
+}
+
+resource "aws_ec2_client_vpn_endpoint" "this" {
+  description            = "${var.environment}-client-vpn"
+  server_certificate_arn = var.vpn_conf.server_certificate_arn
+  client_cidr_block      = var.vpn_conf.client_cidr_block
+  transport_protocol     = var.vpn_conf.transport_protocol
+  vpn_port               = var.vpn_conf.vpn_port
+  split_tunnel           = var.vpn_conf.split_tunnel
+  vpc_id                 = var.vpc_id
+  security_group_ids     = [aws_security_group.vpn.id]
+
+  authentication_options {
+    type                       = "certificate-authentication"
+    root_certificate_chain_arn = var.vpn_conf.client_certificate_arn
+  }
+
+  connection_log_options {
+    enabled               = var.vpn_conf.log_enabled
+    cloudwatch_log_group  = aws_cloudwatch_log_group.vpn.name
+    cloudwatch_log_stream = aws_cloudwatch_log_stream.vpn.name
+  }
+
+  tags = {
+    Name        = "${var.environment}-client-vpn"
+    Environment = var.environment
+  }
+}
+
+resource "aws_ec2_client_vpn_network_association" "this" {
+  for_each               = var.subnet_ids
+  client_vpn_endpoint_id = aws_ec2_client_vpn_endpoint.this.id
+  subnet_id              = each.value
+}
+
+resource "aws_ec2_client_vpn_authorization_rule" "this" {
+  client_vpn_endpoint_id = aws_ec2_client_vpn_endpoint.this.id
+  target_network_cidr    = var.vpc_cidr
+  authorize_all_groups   = true
+}
+
+resource "aws_security_group" "vpn" {
+  name        = "${var.environment}-client-vpn-sg"
+  description = "Security group for Client VPN"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = [var.vpn_conf.client_cidr_block]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name        = "${var.environment}-client-vpn-sg"
+    Environment = var.environment
+  }
+}
+'''
+
+_MOD_CLIENT_VPN_VARS = '''\
+variable "environment" {
+  description = "Environment tag to be used. Ex: dev/qa/production"
+}
+
+variable "vpc_id" {
+  description = "VPC ID to associate the Client VPN with"
+}
+
+variable "vpc_cidr" {
+  description = "VPC CIDR block for authorization rules"
+}
+
+variable "subnet_ids" {
+  description = "Set of subnet IDs to associate with the Client VPN endpoint"
+  type        = set(string)
+}
+
+variable "vpn_conf" {
+  description = "Client VPN configuration"
+}
+'''
+
+_MOD_CLIENT_VPN_OUTPUTS = '''\
+output "endpoint_id" { value = aws_ec2_client_vpn_endpoint.this.id }
+output "dns_name"    { value = aws_ec2_client_vpn_endpoint.this.dns_name }
+'''
 
 
 MODULES = {
@@ -876,6 +1174,7 @@ MODULES = {
     "eks":            {"main.tf": _MOD_EKS_MAIN,   "variables.tf": _MOD_EKS_VARS,  "outputs.tf": _MOD_EKS_OUTPUTS},
     "ecs":            {"main.tf": _MOD_ECS_MAIN,   "variables.tf": _MOD_ECS_VARS,  "outputs.tf": _MOD_ECS_OUTPUTS},
     "s3":             {"main.tf": _MOD_S3_MAIN,    "variables.tf": _MOD_S3_VARS,   "outputs.tf": _MOD_S3_OUTPUTS},
+    "client-vpn":     {"main.tf": _MOD_CLIENT_VPN_MAIN, "variables.tf": _MOD_CLIENT_VPN_VARS, "outputs.tf": _MOD_CLIENT_VPN_OUTPUTS},
 }
 
 
@@ -901,41 +1200,75 @@ class InfraGenerator:
 
     # ── Terraform ─────────────────────────────────────────────────────────────
     def generate_terraform(self, output_dir="output"):
-        os.makedirs(output_dir, exist_ok=True)
+        try:
+            os.makedirs(output_dir, exist_ok=True)
 
-        # Bucket subnet CIDRs by tier for tfvars
-        pub, priv, db = [], [], []
-        for s in self.data['subnets']:
-            {'public': pub, 'private': priv, 'db': db}[s['tier']].append(s['cidr'])
+            # Bucket subnet CIDRs by tier for tfvars
+            pub, priv, db = [], [], []
+            for s in self.data['subnets']:
+                {'public': pub, 'private': priv, 'db': db}[s['tier']].append(s['cidr'])
 
-        root_files = {
-            "main.tf":      _MAIN_TF,
-            "variables.tf": _VARIABLES_TF,
-            "outputs.tf":   _OUTPUTS_TF,
-        }
-        for fname, tmpl in root_files.items():
-            with open(f"{output_dir}/{fname}", "w") as f:
-                f.write(self._render(tmpl).strip() + "\n")
+            root_files = {
+                "main.tf":      _MAIN_TF,
+                "variables.tf": _VARIABLES_TF,
+                "outputs.tf":   _OUTPUTS_TF,
+            }
+            for fname, tmpl in root_files.items():
+                with open(f"{output_dir}/{fname}", "w") as f:
+                    f.write(self._render(tmpl).strip() + "\n")
 
-        with open(f"{output_dir}/examples.tfvars", "w") as f:
-            f.write(self._render(_TFVARS, public_cidrs=pub, private_cidrs=priv, db_cidrs=db).strip() + "\n")
+            with open(f"{output_dir}/examples.tfvars", "w") as f:
+                f.write(self._render(_TFVARS, public_cidrs=pub, private_cidrs=priv, db_cidrs=db).strip() + "\n")
 
-        # Modules
-        all_modules = dict(MODULES)
-        if self.data.get('client_vpn_endpoints'):
-            all_modules['client-vpn'] = _client_vpn_module()
+            # Modules — only write modules for resources that were discovered
+            needed_modules = ['vpc']  # VPC module is always needed
+            if any(sg['name'] != 'default' for sg in self.data.get('security_groups', [])):
+                needed_modules.append('security-group')
+            if self.data.get('nat_gateways'):
+                needed_modules.append('nat-gateway')
+            if self.data.get('ec2_instances'):
+                needed_modules.append('ec2')
+            if self.data.get('rds_instances'):
+                needed_modules.append('rds')
+            if self.data.get('load_balancers'):
+                needed_modules.append('alb')
+            if self.data.get('eks_clusters'):
+                needed_modules.append('eks')
+            if self.data.get('ecs_clusters'):
+                needed_modules.append('ecs')
+            if self.data.get('s3_buckets'):
+                needed_modules.append('s3')
+            if self.data.get('client_vpn_endpoints'):
+                needed_modules.append('client-vpn')
 
-        for mod_name, mod_files in all_modules.items():
-            mod_dir = f"{output_dir}/modules/{mod_name}"
-            os.makedirs(mod_dir, exist_ok=True)
-            for fname, content in mod_files.items():
-                with open(f"{mod_dir}/{fname}", "w") as f:
-                    f.write(content)
+            for mod_name in needed_modules:
+                mod_files = MODULES[mod_name]
+                mod_dir = f"{output_dir}/modules/{mod_name}"
+                os.makedirs(mod_dir, exist_ok=True)
+                for fname, content in mod_files.items():
+                    with open(f"{mod_dir}/{fname}", "w") as f:
+                        f.write(content)
 
-        print(f"✓ Modular Terraform written to {output_dir}/")
+            print(f"✓ Modular Terraform written to {output_dir}/")
+        except (OSError, IOError) as e:
+            print(f"❌ Error writing Terraform files: {e}")
+            raise
+        except Exception as e:
+            print(f"❌ Error generating Terraform: {e}")
+            raise
 
     # ── Draw.io XML Diagram ───────────────────────────────────────────────────
     def generate_drawio(self, output_filename="architecture.drawio"):
+        try:
+            self._generate_drawio_impl(output_filename)
+        except (OSError, IOError) as e:
+            print(f"❌ Error writing diagram file: {e}")
+            raise
+        except Exception as e:
+            print(f"❌ Error generating diagram: {e}")
+            raise
+
+    def _generate_drawio_impl(self, output_filename):
         d = self.data
         vpc = d['vpc']
 
@@ -1043,29 +1376,47 @@ class InfraGenerator:
         AZ_H = AZ_PAD_TOP + SUB_H + AZ_PAD_BOT
         AZ_GAP = 15
 
-        # Column X positions (relative to VPC interior)
-        VPC_PAD_LEFT  = 160   # room for IGW/VPN on the left
-        VPC_PAD_RIGHT = 40
-        VPC_PAD_TOP   = 50
-        VPC_PAD_BOT   = 40
-
+        # Column X positions (relative to AZ interior)
+        COL_GAP = 20
         COL_X = {
-            'public':  VPC_PAD_LEFT,
-            'private': VPC_PAD_LEFT + COL_W['public'],
-            'db':      VPC_PAD_LEFT + COL_W['public'] + COL_W['private'],
+            'public':  COL_GAP,
+            'private': COL_GAP + COL_W['public'] + COL_GAP,
+            'db':      COL_GAP + COL_W['public'] + COL_GAP + COL_W['private'] + COL_GAP,
         }
 
-        VPC_W = VPC_PAD_LEFT + COL_W['public'] + COL_W['private'] + COL_W['db'] + VPC_PAD_RIGHT
+        AZ_W = COL_GAP + COL_W['public'] + COL_GAP + COL_W['private'] + COL_GAP + COL_W['db'] + COL_GAP
+
+        # VPC dimensions (all children use relative coords)
+        VPC_PAD_LEFT  = 110  # room for IGW/VPN on the left inside VPC
+        VPC_PAD_RIGHT = 30
+        VPC_PAD_TOP   = 50
+        VPC_PAD_BOT   = 30
+
+        VPC_W = VPC_PAD_LEFT + AZ_W + VPC_PAD_RIGHT
         VPC_H = VPC_PAD_TOP + len(az_list) * AZ_H + max(0, len(az_list) - 1) * AZ_GAP + VPC_PAD_BOT
 
-        # Absolute positions
-        VPC_X, VPC_Y = 900, 700
+        # Region dimensions (relative to Cloud)
+        IGW_SPACE = 30  # minimal space since IGW is now inside VPC
+        S3_SPACE = 0
+        if d['s3_buckets']:
+            S3_SPACE = 120
 
-        CLOUD_PAD = 120
-        CLOUD_X = VPC_X - CLOUD_PAD - 80
-        CLOUD_Y = VPC_Y - CLOUD_PAD - 160
-        CLOUD_W = VPC_W + CLOUD_PAD * 2 + 80
-        CLOUD_H = VPC_H + CLOUD_PAD * 2 + 200
+        REGION_PAD = 40
+        REGION_W = REGION_PAD + IGW_SPACE + VPC_W + REGION_PAD
+        REGION_H = REGION_PAD + VPC_H + S3_SPACE + REGION_PAD
+
+        # Cloud dimensions (absolute, placed at origin area)
+        CLOUD_PAD = 40
+        CLOUD_X, CLOUD_Y = 50, 50
+        CLOUD_W = CLOUD_PAD * 2 + REGION_W
+        CLOUD_H = CLOUD_PAD * 2 + REGION_H
+
+        # Relative positions within parents
+        REGION_REL_X = CLOUD_PAD
+        REGION_REL_Y = CLOUD_PAD + 30  # room for Cloud label
+
+        VPC_REL_X = REGION_PAD + IGW_SPACE
+        VPC_REL_Y = REGION_PAD + 30  # room for Region label
 
         # ── AWS Cloud ─────────────────────────────────────────────────────────
         cloud_id = nid()
@@ -1078,7 +1429,7 @@ class InfraGenerator:
             f"<b>AWS Cloud</b>",
             CLOUD_X, CLOUD_Y, CLOUD_W, CLOUD_H)
 
-        # ── Region ────────────────────────────────────────────────────────────
+        # ── Region (relative to Cloud) ────────────────────────────────────────
         region_id = nid()
         add_cell(region_id,
             "outlineConnect=0;gradientColor=none;html=1;whiteSpace=wrap;fontSize=13;fontStyle=1;"
@@ -1087,48 +1438,47 @@ class InfraGenerator:
             "strokeColor=#147EBA;fillColor=none;verticalAlign=top;align=left;"
             "spacingLeft=32;fontColor=#147EBA;dashed=1;strokeWidth=2;",
             f"<b>Region: {self.region}</b>",
-            CLOUD_X + 60, CLOUD_Y + 80, CLOUD_W - 120, CLOUD_H - 140,
+            REGION_REL_X, REGION_REL_Y, REGION_W, REGION_H,
             parent=cloud_id)
 
-        # ── VPC ───────────────────────────────────────────────────────────────
+        # ── VPC (relative to Region) ──────────────────────────────────────────
         vpc_cell_id = nid()
         add_cell(vpc_cell_id,
             _group_style("group_vpc", "#248814", "none", "#000000", dashed="0", sw="3"),
             f"<b>VPC: {vpc['name']} ({vpc['cidr']})</b>",
-            VPC_X, VPC_Y, VPC_W, VPC_H,
+            VPC_REL_X, VPC_REL_Y, VPC_W, VPC_H,
             parent=region_id)
 
-        # ── IGW (left of VPC, absolute coords) ───────────────────────────────
+        # ── IGW (inside VPC, left side) ──────────────────────────────────────
         igw_node_id = None
         if d['internet_gateways']:
             igw = d['internet_gateways'][0]
             igw_node_id = nid()
-            igw_x = VPC_X - 130
-            igw_y = VPC_Y + VPC_H // 2 - ICON_H // 2
             add_cell(igw_node_id, _special_style("internet_gateway"),
                      f"<b>{igw['name']}</b>",
-                     igw_x, igw_y, ICON_W, ICON_H, parent=region_id)
+                     (VPC_PAD_LEFT - ICON_W) // 2, VPC_H // 2 - ICON_H // 2,
+                     ICON_W, ICON_H, parent=vpc_cell_id)
 
-        # ── Client VPN (below IGW) ────────────────────────────────────────────
+        # ── Client VPN (inside VPC, below IGW) ────────────────────────────────
         vpn_node_ids = []
         for i, ep in enumerate(d['client_vpn_endpoints']):
             vpn_id = nid()
             vpn_node_ids.append(vpn_id)
             add_cell(vpn_id, _special_style("client_vpn"),
                      f"<b>{ep['name']}</b>",
-                     VPC_X - 130,
-                     VPC_Y + VPC_H // 2 + ICON_H + 40 + i * (ICON_TOTAL_H + 10),
-                     ICON_W, ICON_H, parent=region_id)
+                     (VPC_PAD_LEFT - ICON_W) // 2,
+                     VPC_H // 2 + ICON_H + 30 + i * (ICON_TOTAL_H + 10),
+                     ICON_W, ICON_H, parent=vpc_cell_id)
 
-        # ── S3 (top-right, outside VPC) ───────────────────────────────────────
+        # ── S3 (below VPC, relative to Region) ────────────────────────────────
         s3_node_ids = []
         for i, b in enumerate(d['s3_buckets']):
             s3_id = nid()
             s3_node_ids.append(s3_id)
             add_cell(s3_id, _icon_style("s3", "#277116", "#60A337"),
                      f"<b>{b['name']}</b>",
-                     VPC_X + VPC_W + 60 + i * (ICON_W + 20),
-                     VPC_Y + 20,
+                     VPC_REL_X + 20 + i * (ICON_W + 20),
+                     VPC_REL_Y + VPC_H + 20,
                      ICON_W, ICON_H, parent=region_id)
 
         # ── AZ rows + subnets + icons ─────────────────────────────────────────
@@ -1140,12 +1490,11 @@ class InfraGenerator:
         alb_node_ids  = []
 
         for az_idx, az in enumerate(az_list):
-            az_abs_y = VPC_Y + VPC_PAD_TOP + az_idx * (AZ_H + AZ_GAP)
-            az_abs_x = VPC_X + VPC_PAD_LEFT - 10
+            az_rel_y = VPC_PAD_TOP + az_idx * (AZ_H + AZ_GAP)
+            az_rel_x = VPC_PAD_LEFT
 
-            # AZ group (absolute, inside region)
+            # AZ group (relative to VPC)
             az_id = nid()
-            az_w = COL_W['public'] + COL_W['private'] + COL_W['db'] + 20
             add_cell(az_id,
                 "sketch=0;outlineConnect=0;gradientColor=none;html=1;whiteSpace=wrap;"
                 "fontSize=12;fontStyle=1;container=1;pointerEvents=0;collapsible=0;recursiveResize=0;"
@@ -1153,15 +1502,15 @@ class InfraGenerator:
                 "strokeColor=#545B64;fillColor=none;verticalAlign=top;align=left;"
                 "spacingLeft=32;fontColor=#545B64;dashed=1;strokeWidth=2;",
                 f"<b>{az}</b>",
-                az_abs_x, az_abs_y, az_w, AZ_H,
-                parent=region_id)
+                az_rel_x, az_rel_y, AZ_W, AZ_H,
+                parent=vpc_cell_id)
 
             sub_y_in_az = AZ_PAD_TOP   # y inside AZ cell
 
             # ── Public subnets ────────────────────────────────────────────────
             pub_subs_az = [s for s in tiers['public'] if s['az'] == az]
             for si, sub in enumerate(pub_subs_az):
-                sub_x = COL_X['public'] - (VPC_PAD_LEFT - 10) + si * (max_sub_w('public') + 10)
+                sub_x = COL_X['public']
                 sub_id = nid()
                 sw = max_sub_w('public')
                 add_cell(sub_id,
@@ -1194,7 +1543,7 @@ class InfraGenerator:
             # ── Private app subnets ───────────────────────────────────────────
             priv_subs_az = [s for s in tiers['private'] if s['az'] == az]
             for si, sub in enumerate(priv_subs_az):
-                sub_x = COL_X['private'] - (VPC_PAD_LEFT - 10) + si * (max_sub_w('private') + 10)
+                sub_x = COL_X['private']
                 sw = max_sub_w('private')
                 sub_id = nid()
                 add_cell(sub_id,
@@ -1234,7 +1583,7 @@ class InfraGenerator:
             # ── DB subnets ────────────────────────────────────────────────────
             db_subs_az = [s for s in tiers['db'] if s['az'] == az]
             for si, sub in enumerate(db_subs_az):
-                sub_x = COL_X['db'] - (VPC_PAD_LEFT - 10) + si * (max_sub_w('db') + 10)
+                sub_x = COL_X['db']
                 sw = max_sub_w('db')
                 sub_id = nid()
                 add_cell(sub_id,
@@ -1276,7 +1625,8 @@ class InfraGenerator:
                               dx="1200", dy="800", grid="1", gridSize="10",
                               guides="1", tooltips="1", connect="1", arrows="1",
                               fold="1", page="1", pageScale="1",
-                              pageWidth="1654", pageHeight="1169",
+                              pageWidth=str(max(1654, CLOUD_X + CLOUD_W + 100)),
+                              pageHeight=str(max(1169, CLOUD_Y + CLOUD_H + 100)),
                               math="0", shadow="0")
         root_el = ET.SubElement(model, "root")
         ET.SubElement(root_el, "mxCell", id="0")
